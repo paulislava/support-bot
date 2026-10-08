@@ -23,6 +23,17 @@ export function assertIdentifier(value: string, max = 128): string {
 export function topicName(service: string, userId: string, name?: string): string {
   return `${service} · ${name || userId}`.slice(0, 128);
 }
+export function messageId(value:string|undefined,service:string):string {
+  if(!value)return randomUUID();
+  if(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) return value;
+  const hash=createHash('sha256').update(`${service}:${value}`).digest('hex');
+  return `${hash.slice(0,8)}-${hash.slice(8,12)}-5${hash.slice(13,16)}-a${hash.slice(17,20)}-${hash.slice(20,32)}`;
+}
+export function splitTelegramText(value:string,limit:number):string[] {
+  const parts:string[]=[];let chunk='';let length=0;
+  for(const char of value){const width=char.length;if(length+width>limit){parts.push(chunk);chunk='';length=0;}chunk+=char;length+=width;}
+  if(chunk)parts.push(chunk);return parts;
+}
 export function validateWebhookUrl(value: string, origin: string): string {
   const url = new URL(value);
   const expected = new URL(origin);
@@ -114,7 +125,7 @@ export class SupportBot {
     if (!['app','email'].includes(input.channel) || (!input.text.trim()&&!input.attachments?.length) || input.text.length > 10000|| (input.attachments?.length||0)>4) throw new Error('invalid message');
     if (input.email && (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email) || input.email.length > 254)) throw new Error('invalid email');
     const webhookUrl = input.webhookUrl ? validateWebhookUrl(input.webhookUrl,this.config.webhookOrigins?.[input.service] || '') : null;
-    const id = input.requestId || randomUUID();
+    const id = messageId(input.requestId,input.service);
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -135,11 +146,12 @@ export class SupportBot {
       if (existing) { await client.query('COMMIT'); return { id, threadId:row.id }; }
       const heading = `${input.service} · ${input.channel === 'email' ? 'Email' : 'Приложение'}`;
       const caption=`${heading}\n\n${input.text}`;
+      const parts=splitTelegramText(caption,input.attachments?.length?1024:4096);
       const sent = input.attachments?.length
-        ? {message_id:await this.sendMedia(row.telegram_topic_id,row.id,input.attachments[0],caption.slice(0,1000))}
-        : await this.telegram('sendMessage',{chat_id:this.config.adminChatId,message_thread_id:row.telegram_topic_id,text:caption.slice(0,4096),reply_markup:{inline_keyboard:[[{text:'Info',callback_data:`info:${row.id}`}]]}});
+        ? {message_id:await this.sendMedia(row.telegram_topic_id,row.id,input.attachments[0],parts[0])}
+        : await this.telegram('sendMessage',{chat_id:this.config.adminChatId,message_thread_id:row.telegram_topic_id,text:parts[0],reply_markup:{inline_keyboard:[[{text:'Info',callback_data:`info:${row.id}`}]]}});
       for(const file of input.attachments?.slice(1)||[]) await this.sendMedia(row.telegram_topic_id,row.id,file);
-      if(input.attachments?.length&&caption.length>1000) await this.telegram('sendMessage',{chat_id:this.config.adminChatId,message_thread_id:row.telegram_topic_id,text:caption.slice(1000,5096),reply_markup:{inline_keyboard:[[{text:'Info',callback_data:`info:${row.id}`}]]}});
+      for(const part of parts.slice(1)) await this.telegram('sendMessage',{chat_id:this.config.adminChatId,message_thread_id:row.telegram_topic_id,text:part,reply_markup:{inline_keyboard:[[{text:'Info',callback_data:`info:${row.id}`}]]}});
       await client.query('INSERT INTO support_messages(id,thread_id,sender,channel,body,subject,telegram_message_id) VALUES($1,$2,$3,$4,$5,$6,$7)',[id,row.id,'user',input.channel,input.text,input.subject || null,sent.message_id]);
       await client.query('COMMIT'); return { id,threadId:row.id };
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
