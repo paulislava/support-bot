@@ -42,7 +42,7 @@ export class SupportClient {
     return this.request('GET',`/v1/messages?${query}`);
   }
   private async request(method:string,path:string,data?:unknown):Promise<any> {
-    const response=await fetch(new URL(path,this.baseUrl),{method,headers:{authorization:`Bearer ${this.key}`,'content-type':'application/json'},body:data?JSON.stringify(data):undefined,signal:AbortSignal.timeout(30000)});
+    const response=await fetch(new URL(path.replace(/^\//,''),`${this.baseUrl.replace(/\/$/,'')}/`),{method,headers:{authorization:`Bearer ${this.key}`,'content-type':'application/json'},body:data?JSON.stringify(data):undefined,signal:AbortSignal.timeout(30000)});
     if(!response.ok) throw new Error(`support API failed: ${response.status}`);
     return response.json();
   }
