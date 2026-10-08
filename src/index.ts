@@ -152,9 +152,11 @@ export class SupportBot {
     if (update.callback_query) {
       const callback = update.callback_query;
       if (callback.from?.id !== this.config.adminChatId || callback.message?.chat?.id !== this.config.adminChatId) return;
-      const threadId = typeof callback.data === 'string' && /^info:[0-9a-f-]{36}$/.test(callback.data) ? callback.data.slice(5) : null;
-      if (threadId) {
-        const row = (await this.pool.query('SELECT * FROM support_threads WHERE id=$1 AND telegram_topic_id=$2',[threadId,callback.message.message_thread_id])).rows[0];
+      const callbackData=typeof callback.data==='string'?callback.data:'';
+      const threadId=/^info:[0-9a-f-]{36}$/.test(callbackData)?callbackData.slice(5):null;
+      const legacyUserId=/^support_info:[0-9a-f-]{36}$/.test(callbackData)?callbackData.slice(13):null;
+      if (threadId||legacyUserId) {
+        const row = (await this.pool.query('SELECT * FROM support_threads WHERE (id=$1::uuid OR (service=$2 AND user_id=$3)) AND telegram_topic_id=$4',[threadId,'PaulIsLavaTV',legacyUserId,callback.message.message_thread_id])).rows[0];
         if (row) await this.telegram('sendMessage',{chat_id:this.config.adminChatId,message_thread_id:row.telegram_topic_id,text:this.infoText(row)});
       }
       await this.telegram('answerCallbackQuery',{callback_query_id:callback.id}); return;
