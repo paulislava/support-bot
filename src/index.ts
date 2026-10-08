@@ -100,7 +100,7 @@ export class SupportBot {
   private async sendMedia(topic:number,threadId:string,file:MediaInput,caption?:string):Promise<number> {
     if(!/^(image\/(jpeg|png|heic)|video\/(mp4|quicktime))$/.test(file.mimeType)||!file.base64||file.base64.length>68_000_000||!file.fileName||file.fileName.length>100) throw new Error('invalid attachment');
     const bytes=Buffer.from(file.base64,'base64');if(!bytes.length||bytes.length>48*1024*1024) throw new Error('attachment too large');
-    const kind=file.mimeType.startsWith('image/')?'photo':file.mimeType==='video/mp4'?'video':'document';
+    const kind=(file.mimeType==='image/jpeg'||file.mimeType==='image/png')&&bytes.length<=10*1024*1024?'photo':file.mimeType==='video/mp4'?'video':'document';
     const form=new FormData();form.set('chat_id',String(this.config.adminChatId));form.set('message_thread_id',String(topic));
     form.set('reply_markup',JSON.stringify({inline_keyboard:[[{text:'Info',callback_data:`info:${threadId}`}]]}));
     if(caption) form.set('caption',caption);

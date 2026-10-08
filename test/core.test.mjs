@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { createHmac } from 'node:crypto';
 import { strict as assert } from 'node:assert';
-import { constantTimeEqual, assertIdentifier, topicName, validateWebhookUrl, verifyReplyWebhook, SupportClient, splitTelegramText, messageId } from '../dist/index.js';
+import { constantTimeEqual, assertIdentifier, topicName, validateWebhookUrl, verifyReplyWebhook, SupportClient, SupportBot, splitTelegramText, messageId } from '../dist/index.js';
 
 test('authentication compares full secret',()=>{assert.equal(constantTimeEqual('abc','abc'),true);assert.equal(constantTimeEqual('abc','abcd'),false);});
 test('service and user identifiers reject controls',()=>{assert.throws(()=>assertIdentifier('a\nb'));assert.equal(assertIdentifier('PaulIsLavaTV'),'PaulIsLavaTV');});
@@ -11,3 +11,4 @@ test('reply receiver verifies signature and age',()=>{const data={id:'telegram:4
 test('client keeps reverse proxy path prefix',async()=>{const original=globalThis.fetch;let called;globalThis.fetch=async url=>{called=String(url);return new Response(JSON.stringify({messages:[]}),{status:200})};try{await new SupportClient('https://example.com/support-bot','tv','key').history('user');assert.match(called,/\/support-bot\/v1\/messages\?/)}finally{globalThis.fetch=original}});
 test('long Unicode messages are split without loss',()=>{const body='📺'.repeat(2600);const parts=splitTelegramText(body,1024);assert.ok(parts.every(p=>p.length<=1024));assert.equal(parts.join(''),body)});
 test('email identifiers map to stable UUIDs',()=>{const id=messageId('<mail@example.com>','tv');assert.match(id,/^[0-9a-f-]{36}$/);assert.equal(messageId('<mail@example.com>','tv'),id)});
+test('HEIC is sent as document so Telegram accepts it',async()=>{const bot=new SupportBot({databaseUrl:'postgres://u:p@localhost/x',botToken:'12345678901234567890',adminChatId:1,telegramSecret:'1234567890123456',serviceKeys:{}});const original=globalThis.fetch;let called;globalThis.fetch=async url=>{called=String(url);return new Response(JSON.stringify({ok:true,result:{message_id:7}}),{status:200})};try{await bot.sendMedia(2,'thread',{base64:Buffer.from('image').toString('base64'),mimeType:'image/heic',fileName:'photo.heic'});assert.match(called,/sendDocument$/)}finally{globalThis.fetch=original;await bot.close()}});
