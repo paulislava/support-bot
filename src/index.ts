@@ -4,7 +4,8 @@ import nodemailer from 'nodemailer';
 
 export type Channel = 'app' | 'email';
 export interface Identity { service: string; userId: string; email?: string; name?: string; info?: Record<string, unknown> }
-export interface MessageInput extends Identity { channel: Channel; text: string; requestId?: string; subject?: string; webhookUrl?: string }
+export interface MediaInput { base64:string; mimeType:string; fileName:string }
+export interface MessageInput extends Identity { channel: Channel; text: string; requestId?: string; subject?: string; webhookUrl?: string; attachments?:MediaInput[] }
 export interface Config {
   databaseUrl: string; botToken: string; adminChatId: number; telegramSecret: string;
   serviceKeys: Record<string, string>; webhookOrigins?: Record<string, string>; inboundEmailSecret?: string;
@@ -28,7 +29,7 @@ export function validateWebhookUrl(value: string, origin: string): string {
   if (url.protocol !== 'https:' || expected.protocol !== 'https:' || url.origin !== expected.origin || url.username || url.password || url.hash) throw new Error('webhook URL is not allowed');
   return url.href;
 }
-export interface ReplyEvent { id:string; service:string; userId:string; threadId:string; channel:'app'; text:string; telegramMessageId:number }
+export interface ReplyEvent { id:string; service:string; userId:string; threadId:string; channel:'app'; text:string; telegramMessageId:number; attachment?:MediaInput }
 export class SupportClient {
   constructor(private readonly baseUrl:string,private readonly service:string,private readonly key:string) {
     if(new URL(baseUrl).protocol!=='https:') throw new Error('support API must use HTTPS');
@@ -85,13 +86,32 @@ export class SupportBot {
     if (!response.ok || !result.ok) throw new Error(`Telegram ${method} failed: ${result.error_code || response.status}`);
     return result.result;
   }
+  private async sendMedia(topic:number,threadId:string,file:MediaInput,caption?:string):Promise<number> {
+    if(!/^(image\/(jpeg|png|heic)|video\/(mp4|quicktime))$/.test(file.mimeType)||!file.base64||file.base64.length>68_000_000||!file.fileName||file.fileName.length>100) throw new Error('invalid attachment');
+    const bytes=Buffer.from(file.base64,'base64');if(!bytes.length||bytes.length>48*1024*1024) throw new Error('attachment too large');
+    const kind=file.mimeType.startsWith('image/')?'photo':file.mimeType==='video/mp4'?'video':'document';
+    const form=new FormData();form.set('chat_id',String(this.config.adminChatId));form.set('message_thread_id',String(topic));
+    form.set('reply_markup',JSON.stringify({inline_keyboard:[[{text:'Info',callback_data:`info:${threadId}`}]]}));
+    if(caption) form.set('caption',caption);
+    form.set(kind,new Blob([bytes],{type:file.mimeType}),file.fileName);
+    const response=await fetch(`https://api.telegram.org/bot${this.config.botToken}/send${kind[0].toUpperCase()}${kind.slice(1)}`,{method:'POST',body:form,signal:AbortSignal.timeout(60000)});
+    const result:any=await response.json();if(!response.ok||!result.ok) throw new Error(`Telegram media failed: ${result.error_code||response.status}`);
+    return result.result.message_id;
+  }
+  private async download(fileId:string):Promise<Buffer> {
+    const info=await this.telegram('getFile',{file_id:fileId});
+    if(!info.file_path||info.file_path.startsWith('/')||info.file_path.includes('..')||info.file_size>48*1024*1024) throw new Error('invalid Telegram file');
+    const response=await fetch(`https://api.telegram.org/file/bot${this.config.botToken}/${info.file_path}`,{signal:AbortSignal.timeout(60000)});
+    if(!response.ok) throw new Error('Telegram download failed');const bytes=Buffer.from(await response.arrayBuffer());
+    if(!bytes.length||bytes.length>48*1024*1024) throw new Error('invalid Telegram file size');return bytes;
+  }
   private infoText(row: any): string {
     const details = Object.entries(row.info || {}).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
     return `Сервис: ${row.service}\nПользователь: ${row.user_id}\nИмя: ${row.name || '—'}\nEmail: ${row.email || '—'}${details ? `\n${details}` : ''}`.slice(0, 3500);
   }
   async send(input: MessageInput): Promise<{ id: string; threadId: string }> {
     assertIdentifier(input.service, 80); assertIdentifier(input.userId);
-    if (!['app','email'].includes(input.channel) || !input.text.trim() || input.text.length > 10000) throw new Error('invalid message');
+    if (!['app','email'].includes(input.channel) || (!input.text.trim()&&!input.attachments?.length) || input.text.length > 10000|| (input.attachments?.length||0)>4) throw new Error('invalid message');
     if (input.email && (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email) || input.email.length > 254)) throw new Error('invalid email');
     const webhookUrl = input.webhookUrl ? validateWebhookUrl(input.webhookUrl,this.config.webhookOrigins?.[input.service] || '') : null;
     const id = input.requestId || randomUUID();
@@ -114,7 +134,12 @@ export class SupportBot {
       const existing = (await client.query('SELECT id FROM support_messages WHERE id=$1 AND thread_id=$2',[id,row.id])).rows[0];
       if (existing) { await client.query('COMMIT'); return { id, threadId:row.id }; }
       const heading = `${input.service} · ${input.channel === 'email' ? 'Email' : 'Приложение'}`;
-      const sent = await this.telegram('sendMessage',{chat_id:this.config.adminChatId,message_thread_id:row.telegram_topic_id,text:`${heading}\n\n${input.text}`.slice(0,4096),reply_markup:{inline_keyboard:[[{text:'Info',callback_data:`info:${row.id}`}]]}});
+      const caption=`${heading}\n\n${input.text}`;
+      const sent = input.attachments?.length
+        ? {message_id:await this.sendMedia(row.telegram_topic_id,row.id,input.attachments[0],caption.slice(0,1000))}
+        : await this.telegram('sendMessage',{chat_id:this.config.adminChatId,message_thread_id:row.telegram_topic_id,text:caption.slice(0,4096),reply_markup:{inline_keyboard:[[{text:'Info',callback_data:`info:${row.id}`}]]}});
+      for(const file of input.attachments?.slice(1)||[]) await this.sendMedia(row.telegram_topic_id,row.id,file);
+      if(input.attachments?.length&&caption.length>1000) await this.telegram('sendMessage',{chat_id:this.config.adminChatId,message_thread_id:row.telegram_topic_id,text:caption.slice(1000,5096),reply_markup:{inline_keyboard:[[{text:'Info',callback_data:`info:${row.id}`}]]}});
       await client.query('INSERT INTO support_messages(id,thread_id,sender,channel,body,subject,telegram_message_id) VALUES($1,$2,$3,$4,$5,$6,$7)',[id,row.id,'user',input.channel,input.text,input.subject || null,sent.message_id]);
       await client.query('COMMIT'); return { id,threadId:row.id };
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
@@ -135,7 +160,10 @@ export class SupportBot {
       await this.telegram('answerCallbackQuery',{callback_query_id:callback.id}); return;
     }
     const message = update.message;
-    if (!message || message.chat?.id !== this.config.adminChatId || message.from?.id !== this.config.adminChatId || !message.message_thread_id || !message.text) return;
+    if (!message || message.chat?.id !== this.config.adminChatId || message.from?.id !== this.config.adminChatId || !message.message_thread_id || !(message.text||message.caption||message.photo||message.video)) return;
+    const text=message.text||message.caption||'';
+    const media=message.photo?.length ? {file_id:message.photo.at(-1).file_id,mimeType:'image/jpeg',fileName:'photo.jpg'} : message.video ? {file_id:message.video.file_id,mimeType:message.video.mime_type||'video/mp4',fileName:message.video.file_name||'video.mp4'} : null;
+    const attachment=media?{base64:(await this.download(media.file_id)).toString('base64'),mimeType:media.mimeType,fileName:media.fileName}:undefined;
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -147,20 +175,20 @@ export class SupportBot {
       const channel: Channel = last?.channel || 'app';
       if (channel === 'email') {
         if (!thread.email || !this.mailer || !this.config.smtp) throw new Error('email delivery unavailable');
-        await this.mailer.sendMail({ from:this.config.smtp.from,to:thread.email,subject:`Re: ${last.subject || `${thread.service} support`}`,text:message.text,headers:{'X-Support-Thread':thread.id} });
+        await this.mailer.sendMail({ from:this.config.smtp.from,to:thread.email,subject:`Re: ${last.subject || `${thread.service} support`}`,text,attachments:attachment?[{filename:attachment.fileName,content:Buffer.from(attachment.base64,'base64'),contentType:attachment.mimeType}]:undefined,headers:{'X-Support-Thread':thread.id} });
       }
       if (channel === 'app' && thread.webhook_url) {
         const origin=this.config.webhookOrigins?.[thread.service];
         const key=this.config.serviceKeys[thread.service];
         if (!origin || !key) throw new Error('webhook configuration unavailable');
         const destination=validateWebhookUrl(thread.webhook_url,origin);
-        const payload=JSON.stringify({id:`telegram:${update.update_id}`,service:thread.service,userId:thread.user_id,threadId:thread.id,channel:'app',text:message.text,telegramMessageId:message.message_id});
+        const payload=JSON.stringify({id:`telegram:${update.update_id}`,service:thread.service,userId:thread.user_id,threadId:thread.id,channel:'app',text,telegramMessageId:message.message_id,attachment});
         const timestamp=Math.floor(Date.now()/1000).toString();
         const signature=createHmac('sha256',key).update(`${timestamp}.${payload}`).digest('hex');
         const response=await fetch(destination,{method:'POST',headers:{'content-type':'application/json','x-support-timestamp':timestamp,'x-support-signature':`sha256=${signature}`},body:payload,redirect:'error',signal:AbortSignal.timeout(10000)});
         if(!response.ok) throw new Error(`support webhook failed: ${response.status}`);
       }
-      await client.query('INSERT INTO support_messages(id,thread_id,sender,channel,body,telegram_message_id,telegram_update_id) VALUES($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),thread.id,'support',channel,message.text,message.message_id,update.update_id]);
+      await client.query('INSERT INTO support_messages(id,thread_id,sender,channel,body,telegram_message_id,telegram_update_id) VALUES($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),thread.id,'support',channel,text,message.message_id,update.update_id]);
       await client.query('COMMIT');
     } catch(error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }

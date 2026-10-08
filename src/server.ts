@@ -15,7 +15,7 @@ function respond(res: ServerResponse,status: number,data: unknown): void {
 }
 async function body(req: IncomingMessage): Promise<any> {
   const chunks: Buffer[]=[]; let size=0;
-  for await (const chunk of req) { size+=chunk.length; if(size>256*1024) throw new Error('body too large'); chunks.push(chunk); }
+  for await (const chunk of req) { size+=chunk.length; if(size>270*1024*1024) throw new Error('body too large'); chunks.push(chunk); }
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 export async function start(): Promise<void> {
